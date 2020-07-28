@@ -788,6 +788,11 @@ local Type = {}
 
 
 
+
+
+
+
+
 local Operator = {}
 
 
@@ -855,6 +860,9 @@ local KeyParsed = {}
 
 
 local Node = {}
+
+
+
 
 
 
@@ -2931,6 +2939,7 @@ local INVALID = a_type({ typename = "invalid" })
 local UNKNOWN = a_type({ typename = "unknown" })
 local NOMINAL_FILE = a_type({ typename = "nominal", names = { "FILE" } })
 local NOMINAL_METATABLE = a_type({ typename = "nominal", names = { "METATABLE" } })
+local TYPETYPE = a_type({ typename = "typetype", def = {} })
 
 local OS_DATE_TABLE = a_type({
    typename = "record",
@@ -3238,7 +3247,11 @@ local function show_type_base(t, seen)
    elseif t.typename == "nil" then
       return "nil"
    elseif t.typename == "typetype" then
-      return "type " .. show(t.def)
+      if not t.def.def then
+         return "typetype"
+      else
+         return "type " .. show(t.def)
+      end
    elseif t.typename == "bad_nominal" then
       return table.concat(t.names, ".") .. " (an unknown type)"
    else
@@ -3287,7 +3300,11 @@ end
 function tl.search_module(module_name, search_dtl)
    local found
    local tried = {}
-   local path = os.getenv("TL_PATH") or package.path
+   local path = package.path
+   local tl_path = os.getenv("TL_PATH")
+   if tl_path then
+      path = path .. ";" .. tl_path
+   end
    if search_dtl then
       local found, fd, tried = search_for(module_name, ".d.tl", path, tried)
       if found then
@@ -3349,7 +3366,65 @@ local function require_module(module_name, lax, env, result)
    return UNKNOWN, found ~= nil
 end
 
+local ClassMetadata = {}
+
+
+
+
 local standard_library = {
+   ["class"] = a_type({
+      typename = "record",
+      fields = {
+         ["class"] = a_type({ typename = "function", args = { STRING, TYPETYPE }, rets = {
+               a_type({
+                  typename = "typetype",
+                  def = a_type({
+                     typename = "record",
+                     fields = {},
+                     field_order = {},
+                  }),
+                  on_declare = function(self, node, var, valtype, is_const, is_narrowing, a_type, node_error)
+
+                     if self.metadata == nil then
+                        local meta = { name = node.args_passed[1].conststr, typedef = node.args_passed[2].type.def }
+                        self.metadata = meta
+                     end
+                  end,
+                  on_assign_method = function(self, node, fn_type, a_type, node_error)
+                     local fn_name = node.name.tk
+                     if fn_name == "init" then
+                        local metadata = self.metadata
+                        local name = metadata.name
+                        local props_type = metadata.typedef
+                        for k, field in pairs(props_type.fields) do
+                           self.def.fields[k] = field
+                           table.insert(self.def.field_order, k)
+                        end
+                        fn_type.args[1].type = self
+                        self.def.fields["new"] = a_type({
+                           typename = "function",
+                           typeargs = fn_type.typeargs,
+                           args = fn_type.args,
+                           rets = fn_type.rets,
+                           is_method = true,
+                        })
+                        table.insert(self.def.field_order, "new")
+                     else
+                        fn_type.args[1].type = self
+                        self.def.fields[fn_name] = a_type({
+                           typename = "function",
+                           typeargs = fn_type.typeargs,
+                           args = fn_type.args,
+                           rets = fn_type.rets,
+                           is_method = true,
+                        })
+                        table.insert(self.def.field_order, fn_name)
+                     end
+                  end,
+               }),
+            }, }),
+      },
+   }),
    ["..."] = a_type({ typename = "tuple", STRING, STRING, STRING, STRING, STRING }),
    ["@return"] = a_type({ typename = "tuple", ANY }),
    ["any"] = a_type({ typename = "typetype", def = ANY }),
@@ -4073,6 +4148,9 @@ function tl.type_check(ast, opts)
          st[#st][var].t = valtype
       else
          st[#st][var] = { t = valtype, is_const = is_const, is_narrowed = is_narrowing }
+         if valtype.on_declare then
+            valtype:on_declare(node, var, valtype, is_const, is_narrowing, a_type, node_error)
+         end
       end
    end
 
@@ -4953,6 +5031,10 @@ function tl.type_check(ast, opts)
 
       add_var(nil, "@return", node.rets or a_type({ typename = "tuple" }))
       if recurse then
+
+
+
+
          add_var(nil, node.name.tk, a_type({
             typename = "function",
             args = args,
@@ -5579,6 +5661,19 @@ function tl.type_check(ast, opts)
                   t.declared_at = node
                   t.assigned_to = var.tk
                end
+
+               local args = {}
+               if node.exps then
+                  for _, v in ipairs(node.exps) do
+                     if v.kind == "op" and v.op.op == "@funcall" then
+                        for _, arg in ipairs(v.e2) do
+                           args[#args + 1] = arg
+                        end
+                     end
+                  end
+               end
+               var.args_passed = args
+
                assert(var)
                add_var(var, var.tk, t, var.is_const)
 
@@ -6019,6 +6114,9 @@ function tl.type_check(ast, opts)
                   rtype.field_order = rtype.field_order or {}
                   rtype.fields[node.name.tk] = fn_type
                   table.insert(rtype.field_order, node.name.tk)
+                  if node.fn_owner and node.fn_owner.type.on_assign_method then
+                     node.fn_owner.type:on_assign_method(node, fn_type, a_type, node_error)
+                  end
                else
                   local name = tl.pretty_print_ast(node.fn_owner)
                   node_error(node, "cannot add undeclared function '" .. node.name.tk .. "' outside of the scope where '" .. name .. "' was originally declared")

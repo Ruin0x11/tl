@@ -3401,6 +3401,7 @@ local standard_library = {
                            table.insert(self.def.field_order, k)
                         end
                         fn_type.args[1].type = self
+                        fn_type.rets[1] = self
                         self.def.fields["new"] = a_type({
                            typename = "function",
                            typeargs = fn_type.typeargs,
